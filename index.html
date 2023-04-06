@@ -3,9 +3,20 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Hello World</title>
+    <title>Simple Twitter-like Interface</title>
+    <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <h1>Hello World</h1>
+    <header>
+        <h1>Simple Twitter-like Interface</h1>
+    </header>
+    <main>
+        <form id="tweet-form">
+            <textarea id="tweet-text" placeholder="What's happening?" maxlength="280"></textarea>
+            <button type="submit">Tweet</button>
+        </form>
+        <section id="tweets-container"></section>
+    </main>
+    <script src="script.js"></script>
 </body>
 </html>
