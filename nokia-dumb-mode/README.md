@@ -3,16 +3,20 @@
 Turns your Android phone into a Nokia 3310-style phone: a green backlit LCD, a T9 keypad that is always on screen, and nothing else unless you allow it.
 
 ## Features
-- **Idle screen:** NOKIA logo, big clock, date, and signal/battery bars. Type digits to dial right away.
-- **Menu**, one item per page with pixel icons: Messages, Names, Call register, Games (Snake II), Clock, Apps, Settings.
-- **Keypad:** two soft keys, ▲/▼, CALL/END and 0–9 * #. Plays DTMF tones and vibrates. Long-press 0 for `+`, long-press Clear to erase everything.
-- **Backlight:** the LCD and keypad glow green, then dim after 5–60 s (set in Settings). Any key lights them up again.
-- **Names:** T9 search (type `564` to find "John"). Then call, or write a message.
-- **Messages:** multi-tap T9 text entry (`#` switches abc/Abc/ABC). Sending opens your SMS app with the text filled in. Inbox opens your SMS app.
-- **Clock:** alarm and countdown timer, using your phone's clock app.
-- **Apps:** only the apps you allow (WhatsApp, Maps…). Changing the list needs the security code.
-- **Snake II:** use 2/4/6/8 or ▲▼, 5 to pause. Keeps a high score.
-- **Exit dumb mode:** needs the security code. **Default code: `0000`.** Change it in Settings → Change code.
+- **Look:** a black or white Nokia body with a black screen bezel and a pixel font (Pixelify Sans, SIL OFL). Every screen has a status bar (title or signal, time, battery) and Select/Back soft keys.
+- **Screen colors** (Settings → Display): Sage, Classic green, Black on white, White on black, Amber, Blue. **Phone body:** Black or White.
+- **Idle screen:** pixel mountain wallpaper and the date, or a big clock. Soft keys **Menu / Apps**. Type digits to dial right away. ▲ Messages, ▼/▶ Contacts, ◀ Camera, CALL = recent calls.
+- **Keypad:** two soft keys, a 4-way navigation key with OK in the middle, green call / red end keys, and 0–9 * #. Plays DTMF tones and vibrates. Long-press 0 for `+`.
+- **Backlight:** the screen and keypad dim after 5–60 s and light up again on any key press.
+- **Menu:** a 3×3 icon grid: Phone, Messages, Contacts, Camera, Gallery, Clock, Games, Apps, Settings.
+- **Calls:** shows a Nokia-style "Calling… Mama" screen, then hands the call to your phone app (incoming calls are untouched).
+- **Contacts:** T9 search (type `626` to find "Mama"). Call or send a message from there.
+- **Messages:** All Messages (SMS inbox + multi-tap T9 writing), plus WhatsApp, Messenger, Telegram, Viber or Signal if they're installed, shown with pixelated icons.
+- **Camera:** a live black & white dithered viewfinder on the LCD. Photos save in full quality to `Pictures/NokiaMode`. **Gallery** shows them in LCD style.
+- **Apps:** a grid of the apps you allow, with pixelated icons. **More** (needs the code) picks which apps are allowed.
+- **Settings:** Wi-Fi and Sound open Android's quick panels. Bluetooth and the full settings screens need the code.
+- **Snake II**, alarm and countdown timer.
+- **Exit dumb mode:** needs the security code. **Default code: `0000`.**
 
 ## Install
 1. Download the APK: GitHub → **Actions** → *Build Nokia Mode APK* → latest run → **nokia-mode-apk** artifact.

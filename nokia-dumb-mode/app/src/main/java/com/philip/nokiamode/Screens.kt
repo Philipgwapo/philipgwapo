@@ -1,14 +1,14 @@
 package com.philip.nokiamode
 
 import android.Manifest
-import android.content.Context
 import android.content.Intent
-import android.os.BatteryManager
+import android.graphics.drawable.GradientDrawable
+import android.os.Build
 import android.os.SystemClock
 import android.provider.AlarmClock
 import android.provider.CallLog
 import android.provider.ContactsContract
-import android.telephony.TelephonyManager
+import android.provider.Settings
 import android.view.Gravity
 import android.view.View
 import android.widget.LinearLayout
@@ -18,8 +18,9 @@ import java.util.Date
 import java.util.Locale
 
 abstract class Screen(val host: MainActivity) {
+    /** Status bar title; empty shows the signal bars instead. */
     open val title: String = ""
-    open val indicator: String = ""
+    open val showTime: Boolean = true
     open val leftSoft: String = "Select"
     open val centerSoft: String = ""
     open val rightSoft: String = "Back"
@@ -27,34 +28,44 @@ abstract class Screen(val host: MainActivity) {
     /** Builds the LCD content. Called on every refresh, so keep state in fields. */
     abstract fun render(): View
 
-    /** Returns true if the key was consumed; otherwise END goes home and SOFT_R goes back. */
+    /** Returns true if the key was consumed; otherwise OK acts as Select, END goes home and SOFT_R goes back. */
     open fun onKey(k: Key): Boolean = false
     open fun onLongKey(k: Key): Boolean = false
     open fun onShow() {}
     open fun onHide() {}
+    open fun onTick() {}
 
     protected fun column(gravity: Int = Gravity.TOP): LinearLayout = LinearLayout(host).apply {
         orientation = LinearLayout.VERTICAL
         this.gravity = gravity
     }
 
-    protected fun text(s: String, size: Float = 18f, gravity: Int = Gravity.START, inverse: Boolean = false, multiline: Boolean = false): TextView =
-        host.lcdText(s, size).apply {
-            this.gravity = gravity
-            if (multiline) {
-                isSingleLine = false
-                ellipsize = null
-            }
-            if (inverse) {
-                setBackgroundColor(Lcd.FG)
-                setTextColor(host.lcdBg)
-            }
-            val p = host.dpi(3f)
-            setPadding(p, p, p, p)
-        }
+    protected fun row(): LinearLayout = LinearLayout(host).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+    }
 
-    protected fun LinearLayout.add(v: View, weight: Float = 0f): View {
-        addView(v, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, if (weight > 0) 0 else LinearLayout.LayoutParams.WRAP_CONTENT, weight))
+    protected fun text(
+        s: String, size: Float = 17f, gravity: Int = Gravity.START,
+        bold: Boolean = false, color: Int = host.fg, multiline: Boolean = false,
+    ): TextView = host.lcdText(s, size, bold).apply {
+        this.gravity = gravity
+        setTextColor(color)
+        if (multiline) {
+            isSingleLine = false
+            ellipsize = null
+        }
+    }
+
+    protected fun icon(mask: Mask?, color: Int = host.fg) = MaskView(host, mask, color)
+
+    protected fun selection(radius: Float = 5f) = GradientDrawable().apply {
+        cornerRadius = host.dp(radius)
+        setColor(host.fg)
+    }
+
+    protected fun LinearLayout.add(v: View, weight: Float = 0f, height: Int = LinearLayout.LayoutParams.WRAP_CONTENT): View {
+        addView(v, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, if (weight > 0) 0 else height, weight))
         return v
     }
 }
@@ -64,11 +75,12 @@ abstract class Screen(val host: MainActivity) {
 class SplashScreen(host: MainActivity) : Screen(host) {
     override val leftSoft = ""
     override val rightSoft = ""
+    override val showTime = false
     private val done = Runnable { host.home() }
 
     override fun render(): View = column(Gravity.CENTER).apply {
-        add(text("NOKIA", 40f, Gravity.CENTER))
-        add(text("CONNECTING PEOPLE", 12f, Gravity.CENTER))
+        add(text("NOKIA", 40f, Gravity.CENTER, bold = true))
+        add(text("CONNECTING PEOPLE", 13f, Gravity.CENTER))
     }
 
     override fun onShow() { host.handler.postDelayed(done, 1800) }
@@ -98,49 +110,40 @@ class NoteScreen(host: MainActivity, private val msg: String, private val ms: Lo
 
 class HomeScreen(host: MainActivity) : Screen(host) {
     override val leftSoft = "Menu"
-    override val rightSoft = "Names"
-    private val tick = object : Runnable {
-        override fun run() {
-            host.refresh()
-            host.handler.postDelayed(this, 1000)
-        }
-    }
+    override val rightSoft = "Apps"
+    override val showTime get() = !host.prefs.bigClock
+    private var shownMinute = ""
+
+    private fun now(pattern: String) = SimpleDateFormat(pattern, Locale.getDefault()).format(Date())
 
     override fun render(): View {
-        val row = LinearLayout(host).apply { orientation = LinearLayout.HORIZONTAL }
-        val side = host.dpi(22f)
-        row.addView(BarsView(host, signalLevel(), "Y"), LinearLayout.LayoutParams(side, LinearLayout.LayoutParams.MATCH_PARENT))
-        val mid = column(Gravity.CENTER).apply {
-            add(text("NOKIA", 20f, Gravity.CENTER))
-            add(text(SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date()), 44f, Gravity.CENTER))
-            add(text(SimpleDateFormat("EEE d MMM", Locale.getDefault()).format(Date()), 16f, Gravity.CENTER))
+        shownMinute = now("HH:mm")
+        val wall = icon(Wallpaper.mask)
+        return column().apply {
+            if (host.prefs.bigClock) {
+                add(text(shownMinute, 46f, Gravity.CENTER, bold = true))
+                add(text(now("EEE, MMM d"), 16f, Gravity.CENTER))
+                add(wall, 1f)
+            } else {
+                add(wall, 1f)
+                add(text(now("EEE, MMM d").uppercase(Locale.getDefault()), 18f, Gravity.CENTER).apply {
+                    setPadding(0, host.dpi(6f), 0, host.dpi(2f))
+                })
+            }
         }
-        row.addView(mid, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f))
-        row.addView(BarsView(host, batteryLevel(), "B"), LinearLayout.LayoutParams(side, LinearLayout.LayoutParams.MATCH_PARENT))
-        return row
     }
 
-    private fun batteryLevel(): Int {
-        val bm = host.getSystemService(Context.BATTERY_SERVICE) as BatteryManager
-        val pct = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
-        return ((pct + 24) / 25).coerceIn(0, 4)
+    override fun onTick() {
+        if (now("HH:mm") != shownMinute) host.refresh()
     }
-
-    private fun signalLevel(): Int = try {
-        val tm = host.getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
-        if (android.os.Build.VERSION.SDK_INT >= 28) tm.signalStrength?.level ?: 0 else 4
-    } catch (e: Exception) {
-        0
-    }
-
-    override fun onShow() { host.handler.post(tick) }
-    override fun onHide() { host.handler.removeCallbacks(tick) }
 
     override fun onKey(k: Key): Boolean {
         when {
-            k == Key.SOFT_L -> host.push(MenuScreen(host))
-            k == Key.SOFT_R || k == Key.DOWN -> host.push(ContactsScreen(host))
-            k == Key.UP -> host.push(MessagesMenu(host))
+            k == Key.SOFT_L -> host.push(MainMenu(host))
+            k == Key.SOFT_R -> host.push(AppsScreen(host))
+            k == Key.DOWN || k == Key.RIGHT -> host.push(ContactsScreen(host))
+            k == Key.UP -> host.push(MessagesScreen(host))
+            k == Key.LEFT -> host.push(CameraScreen(host))
             k == Key.CALL -> host.push(CallLogScreen(host))
             k.digit != null -> host.push(DialerScreen(host, k.digit.toString()))
             else -> return k == Key.END
@@ -154,50 +157,69 @@ class HomeScreen(host: MainActivity) : Screen(host) {
     }
 }
 
-// ------------------------------------------------------------------ main menu
+// ------------------------------------------------------------------ grid & list
 
-class MenuScreen(host: MainActivity) : Screen(host) {
-    private class Entry(val name: String, val icon: List<String>, val open: () -> Unit)
+/** 3-column icon grid like the reference Menu and Apps screens. */
+open class GridScreen(host: MainActivity, private val name: String) : Screen(host) {
+    class Cell(val label: String, val icon: Mask?, val action: () -> Unit)
 
-    private val entries = listOf(
-        Entry("Messages", Icons.MESSAGES) { host.push(MessagesMenu(host)) },
-        Entry("Names", Icons.NAMES) { host.push(ContactsScreen(host)) },
-        Entry("Call register", Icons.CALLS) { host.push(CallLogScreen(host)) },
-        Entry("Games", Icons.SNAKE) { host.push(SnakeScreen(host)) },
-        Entry("Clock", Icons.CLOCK) { host.push(ClockMenu(host)) },
-        Entry("Apps", Icons.APPS) { host.push(AppsScreen(host)) },
-        Entry("Settings", Icons.SETTINGS) { host.push(SettingsScreen(host)) },
-    )
-    private var sel = 0
+    protected var cells: List<Cell> = emptyList()
+    protected var sel = 0
+    private val cols = 3
+    private val rows = 3
+    open val emptyText = "(empty)"
 
-    override val title get() = entries[sel].name
-    override val indicator get() = "${sel + 1}"
+    override val title get() = name
 
-    override fun render(): View {
-        val row = LinearLayout(host).apply { orientation = LinearLayout.HORIZONTAL }
-        val icon = PixelView(host, entries[sel].icon)
-        val p = host.dpi(12f)
-        icon.setPadding(p, p, p, p)
-        row.addView(icon, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f).apply { setMargins(p, p, p, p) })
-        // scroll bar on the right, like the original
-        val bar = column()
-        entries.indices.forEach { i ->
-            bar.addView(View(host).apply { setBackgroundColor(if (i == sel) Lcd.FG else 0) },
-                LinearLayout.LayoutParams(host.dpi(6f), 0, 1f))
+    open fun loadCells(): List<Cell> = emptyList()
+
+    override fun onShow() {
+        cells = loadCells()
+        sel = sel.coerceIn(0, (cells.size - 1).coerceAtLeast(0))
+    }
+
+    override fun render(): View = column().apply {
+        if (cells.isEmpty()) {
+            gravity = Gravity.CENTER
+            add(text(emptyText, 16f, Gravity.CENTER, multiline = true))
+            return@apply
         }
-        bar.setBackgroundColor(0x332E3B2B)
-        row.addView(bar, LinearLayout.LayoutParams(host.dpi(6f), LinearLayout.LayoutParams.MATCH_PARENT))
-        return row
+        val totalRows = (cells.size + cols - 1) / cols
+        val firstRow = (sel / cols - rows + 1).coerceAtLeast(0).coerceAtMost((totalRows - rows).coerceAtLeast(0))
+        for (r in firstRow until firstRow + rows) {
+            val line = row()
+            for (c in 0 until cols) {
+                val i = r * cols + c
+                val cell = column(Gravity.CENTER_HORIZONTAL)
+                cells.getOrNull(i)?.let { item ->
+                    val selected = i == sel
+                    val box = icon(item.icon, if (selected) host.bg else host.fg)
+                    val p = host.dpi(5f)
+                    box.setPadding(p, p, p, p)
+                    if (selected) box.background = selection(7f)
+                    cell.addView(box, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f).apply {
+                        setMargins(host.dpi(8f), host.dpi(2f), host.dpi(8f), host.dpi(1f))
+                    })
+                    cell.add(text(item.label, 12f, Gravity.CENTER, bold = selected))
+                }
+                line.addView(cell, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f))
+            }
+            add(line, 1f)
+        }
     }
 
     override fun onKey(k: Key): Boolean {
+        val n = cells.size
+        if (n == 0) return false
         when (k) {
-            Key.UP -> sel = (sel - 1 + entries.size) % entries.size
-            Key.DOWN -> sel = (sel + 1) % entries.size
-            Key.SOFT_L, Key.CALL -> { entries[sel].open(); return true }
+            Key.LEFT -> sel = (sel - 1 + n) % n
+            Key.RIGHT -> sel = (sel + 1) % n
+            Key.UP -> sel = if (sel - cols >= 0) sel - cols else sel
+            Key.DOWN -> sel = if (sel + cols < n) sel + cols else sel
+            Key.SOFT_L, Key.CALL -> { cells[sel].action(); return true }
             else -> {
                 val d = k.digit?.digitToIntOrNull() ?: return false
-                if (d in 1..entries.size) { sel = d - 1; entries[sel].open() }
+                if (d in 1..n) { sel = d - 1; cells[sel].action() }
                 return true
             }
         }
@@ -206,20 +228,20 @@ class MenuScreen(host: MainActivity) : Screen(host) {
     }
 }
 
-// ------------------------------------------------------------------ generic list
-
 open class ListScreen(host: MainActivity, private val name: String) : Screen(host) {
-    class Item(val label: String, val action: () -> Unit)
+    class Item(val label: String, val icon: Mask? = null, val sub: Boolean = false, val action: () -> Unit)
 
     protected var items: List<Item> = emptyList()
     protected var sel = 0
     open val emptyText = "(empty)"
-    private val rows = 6
+    open val visibleRows = 5
 
     override val title get() = name
-    override val centerSoft get() = if (items.isEmpty()) "" else "${sel + 1}/${items.size}"
 
     open fun loadItems(): List<Item> = emptyList()
+
+    /** Optional fixed row above the list (e.g. the contact search box). */
+    open fun header(): View? = null
 
     override fun onShow() {
         items = loadItems()
@@ -232,14 +254,38 @@ open class ListScreen(host: MainActivity, private val name: String) : Screen(hos
     }
 
     override fun render(): View = column().apply {
+        val head = header()
+        var rows = visibleRows
+        if (head != null) {
+            add(head, 1f)
+            rows--
+        }
         if (items.isEmpty()) {
-            gravity = Gravity.CENTER
-            add(text(emptyText, 16f, Gravity.CENTER, multiline = true))
+            add(text(emptyText, 16f, Gravity.CENTER, multiline = true).apply { gravity = Gravity.CENTER }, rows.toFloat())
             return@apply
         }
         val start = (sel - rows / 2).coerceAtMost(items.size - rows).coerceAtLeast(0)
-        for (i in start until minOf(items.size, start + rows)) {
-            add(text(items[i].label, 17f, inverse = i == sel))
+        for (slot in 0 until rows) {
+            val i = start + slot
+            val item = items.getOrNull(i)
+            if (item == null) {
+                add(View(host), 1f)
+                continue
+            }
+            add(rowFor(item, i == sel), 1f)
+        }
+    }
+
+    private fun rowFor(item: Item, selected: Boolean): View {
+        val color = if (selected) host.bg else host.fg
+        return row().apply {
+            setPadding(host.dpi(6f), 0, host.dpi(6f), 0)
+            if (selected) background = selection()
+            if (item.icon != null) {
+                addView(icon(item.icon, color), LinearLayout.LayoutParams(host.dpi(20f), host.dpi(18f)).apply { marginEnd = host.dpi(9f) })
+            }
+            addView(text(item.label, 17f, color = color, bold = selected), LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            if (selected && item.sub) addView(icon(Icons.CHEVRON, color), LinearLayout.LayoutParams(host.dpi(9f), host.dpi(13f)))
         }
     }
 
@@ -249,6 +295,8 @@ open class ListScreen(host: MainActivity, private val name: String) : Screen(hos
             Key.UP -> if (n > 0) sel = (sel - 1 + n) % n
             Key.DOWN -> if (n > 0) sel = (sel + 1) % n
             Key.SOFT_L, Key.CALL -> { if (n > 0) items[sel].action(); return true }
+            Key.RIGHT -> { if (n > 0 && items[sel].sub) items[sel].action(); return true }
+            Key.LEFT -> { host.pop(); return true }
             else -> return false
         }
         host.refresh()
@@ -260,7 +308,31 @@ class SimpleList(host: MainActivity, name: String, private val provider: () -> L
     override fun loadItems() = provider()
 }
 
+// ------------------------------------------------------------------ main menu
+
+class MainMenu(host: MainActivity) : GridScreen(host, "Menu") {
+    override fun loadCells() = listOf(
+        Cell("Phone", Icons.PHONE) { host.push(PhoneMenu(host)) },
+        Cell("Messages", Icons.MESSAGES) { host.push(MessagesScreen(host)) },
+        Cell("Contacts", Icons.CONTACTS) { host.push(ContactsScreen(host)) },
+        Cell("Camera", Icons.CAMERA) { host.push(CameraScreen(host)) },
+        Cell("Gallery", Icons.GALLERY) { host.push(GalleryScreen(host)) },
+        Cell("Clock", Icons.CLOCK) { host.push(ClockMenu(host)) },
+        Cell("Games", Icons.GAMES) { host.push(SnakeScreen(host)) },
+        Cell("Apps", Icons.APPS) { host.push(AppsScreen(host)) },
+        Cell("Settings", Icons.SETTINGS) { host.push(SettingsScreen(host)) },
+    )
+}
+
 // ------------------------------------------------------------------ calls
+
+class PhoneMenu(host: MainActivity) : ListScreen(host, "Phone") {
+    override fun loadItems() = listOf(
+        Item("Dial number", Icons.PHONE) { host.push(DialerScreen(host, "")) },
+        Item("Recent calls", Icons.CLOCK, sub = true) { host.push(CallLogScreen(host)) },
+        Item("Contacts", Icons.CONTACTS, sub = true) { host.push(ContactsScreen(host)) },
+    )
+}
 
 class DialerScreen(
     host: MainActivity,
@@ -275,7 +347,7 @@ class DialerScreen(
     override val rightSoft get() = if (number.isEmpty()) "Back" else "Clear"
 
     override fun render(): View = column(Gravity.BOTTOM).apply {
-        add(text(number.toString(), if (number.length > 12) 22f else 32f, Gravity.END, multiline = true))
+        add(text(number.toString(), if (number.length > 11) 24f else 36f, Gravity.END, bold = true, multiline = true))
     }
 
     private fun confirm() {
@@ -289,7 +361,7 @@ class DialerScreen(
         when {
             k.digit != null -> number.append(k.digit)
             k == Key.SOFT_R && number.isNotEmpty() -> number.deleteCharAt(number.length - 1)
-            k == Key.SOFT_L || k == Key.CALL -> { confirm(); return true }
+            k == Key.SOFT_L || k == Key.CALL || k == Key.OK -> { confirm(); return true }
             else -> return false
         }
         host.refresh()
@@ -307,22 +379,59 @@ class DialerScreen(
     }
 }
 
+class CallingScreen(host: MainActivity, private val number: String, private val name: String) : Screen(host) {
+    override val leftSoft = "Options"
+    override val rightSoft = "End"
+    private val dial = Runnable {
+        host.close(this)
+        host.placeCall(number)
+    }
+
+    override fun render(): View = column(Gravity.CENTER).apply {
+        add(icon(Icons.PHONE), height = host.dpi(64f))
+        add(text("Calling...", 17f, Gravity.CENTER).apply { setPadding(0, host.dpi(8f), 0, 0) })
+        add(text(name, 22f, Gravity.CENTER, bold = true))
+    }
+
+    override fun onShow() { host.handler.postDelayed(dial, 1300) }
+    override fun onHide() { host.handler.removeCallbacks(dial) }
+
+    override fun onKey(k: Key): Boolean {
+        when (k) {
+            Key.SOFT_R, Key.END -> host.close(this)
+            Key.SOFT_L, Key.OK, Key.CALL -> { host.handler.removeCallbacks(dial); dial.run() }
+            else -> {}
+        }
+        return true
+    }
+}
+
 class ContactsScreen(
     host: MainActivity,
     private val onPick: ((String, String) -> Unit)? = null,
-) : ListScreen(host, "Names") {
+) : ListScreen(host, "Contacts") {
     private class Contact(val name: String, val number: String)
 
     private var all: List<Contact> = emptyList()
     private var shown: List<Contact> = emptyList()
     private val query = StringBuilder()
 
-    override val title get() = if (query.isEmpty()) "Names" else "Find: $query"
     override val rightSoft get() = if (query.isEmpty()) "Back" else "Clear"
     override val emptyText get() = when {
         !host.hasPermission(Manifest.permission.READ_CONTACTS) -> "No permission to read contacts"
         query.isNotEmpty() -> "No matches"
-        else -> "No names"
+        else -> "No contacts"
+    }
+
+    override fun header(): View = row().apply {
+        val p = host.dpi(6f)
+        setPadding(p, 0, p, 0)
+        background = GradientDrawable().apply {
+            cornerRadius = host.dp(4f)
+            setStroke(host.dpi(1.5f), host.fg)
+        }
+        addView(icon(Icons.SEARCH), LinearLayout.LayoutParams(host.dpi(15f), host.dpi(15f)).apply { marginEnd = p })
+        addView(text(if (query.isEmpty()) "Search..." else query.toString(), 16f), LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
     }
 
     override fun onShow() {
@@ -351,15 +460,18 @@ class ContactsScreen(
         val q = query.toString()
         shown = all.filter { q.isEmpty() || T9.matches(it.name, it.number, q) }
         return shown.map { c ->
-            Item(c.name) {
+            Item(c.name, Icons.CONTACTS) {
                 if (onPick != null) {
                     host.pop()
                     onPick.invoke(c.name, c.number)
                 } else {
                     host.push(SimpleList(host, c.name) {
                         listOf(
-                            Item("Call ${c.number}") { host.call(c.number) },
-                            Item("Send message") { host.push(TextEntryScreen(host, "Message to ${c.name}") { body -> host.sms(c.number, body) }) },
+                            Item("Call", Icons.PHONE) { host.call(c.number, c.name) },
+                            Item("Send message", Icons.MESSAGES) {
+                                host.push(TextEntryScreen(host, c.name) { body -> host.sms(c.number, body) })
+                            },
+                            Item(c.number, null) {},
                         )
                     })
                 }
@@ -370,11 +482,12 @@ class ContactsScreen(
     override fun onKey(k: Key): Boolean {
         when {
             k == Key.CALL && onPick == null -> {
-                shown.getOrNull(sel)?.let { host.call(it.number) }
+                shown.getOrNull(sel)?.let { host.call(it.number, it.name) }
                 return true
             }
             k.digit?.isDigit() == true -> { query.append(k.digit); sel = 0; reload(); return true }
             k == Key.SOFT_R && query.isNotEmpty() -> { query.deleteCharAt(query.length - 1); sel = 0; reload(); return true }
+            k == Key.LEFT || k == Key.RIGHT -> return true
         }
         return super.onKey(k)
     }
@@ -399,7 +512,7 @@ object T9 {
     }
 }
 
-class CallLogScreen(host: MainActivity) : ListScreen(host, "Call register") {
+class CallLogScreen(host: MainActivity) : ListScreen(host, "Recent calls") {
     override val emptyText get() =
         if (!host.hasPermission(Manifest.permission.READ_CALL_LOG)) "No permission to read calls" else "No calls"
 
@@ -418,8 +531,8 @@ class CallLogScreen(host: MainActivity) : ListScreen(host, "Call register") {
                         CallLog.Calls.MISSED_TYPE -> "!"
                         else -> "-"
                     }
-                    val label = "$mark ${if (name.isNullOrBlank()) num else name}"
-                    out.add(Item(label) { host.call(num) })
+                    val who = if (name.isNullOrBlank()) num else name
+                    out.add(Item("$mark $who", Icons.PHONE) { host.call(num, who) })
                 }
             }
         } catch (e: SecurityException) {
@@ -431,22 +544,41 @@ class CallLogScreen(host: MainActivity) : ListScreen(host, "Call register") {
 
 // ------------------------------------------------------------------ messages
 
-class MessagesMenu(host: MainActivity) : ListScreen(host, "Messages") {
+class MessagesScreen(host: MainActivity) : ListScreen(host, "Messages") {
+    private val messengers = listOf(
+        "com.facebook.orca" to "Messenger",
+        "org.telegram.messenger" to "Telegram",
+        "com.whatsapp" to "WhatsApp",
+        "com.whatsapp.w4b" to "WA Business",
+        "com.viber.voip" to "Viber",
+        "org.thoughtcrime.securesms" to "Signal",
+    )
+
+    override fun loadItems(): List<Item> {
+        val list = arrayListOf(Item("All Messages", Icons.MESSAGES, sub = true) { host.push(SmsMenu(host)) })
+        messengers.filter { host.isInstalled(it.first) }.forEach { (pkg, label) ->
+            list.add(Item(label, AppIcons.mask(host, pkg) ?: Icons.MESSAGES) { host.launchPackage(pkg) })
+        }
+        return list
+    }
+}
+
+class SmsMenu(host: MainActivity) : ListScreen(host, "All Messages") {
     override fun loadItems() = listOf(
-        Item("Write message") {
+        Item("Inbox", Icons.MESSAGES) { host.openMessagesApp() },
+        Item("Write message", Icons.SMS_NEW) {
             host.push(TextEntryScreen(host, "Message") { body ->
-                host.push(ContactsOrNumber(host) { number -> host.sms(number, body) })
+                host.push(SendToScreen(host) { number -> host.sms(number, body) })
             })
         },
-        Item("Inbox") { host.openMessagesApp() },
     )
 }
 
 /** "Number or search" step after writing an SMS. */
-class ContactsOrNumber(host: MainActivity, private val onNumber: (String) -> Unit) : ListScreen(host, "Send to") {
+class SendToScreen(host: MainActivity, private val onNumber: (String) -> Unit) : ListScreen(host, "Send to") {
     override fun loadItems() = listOf(
-        Item("Enter number") { host.replace(DialerScreen(host, "", "Number:") { onNumber(it) }) },
-        Item("Search names") { host.replace(ContactsScreen(host) { _, num -> onNumber(num) }) },
+        Item("Enter number", Icons.PHONE) { host.replace(DialerScreen(host, "", "Number") { onNumber(it) }) },
+        Item("Search contacts", Icons.CONTACTS) { host.replace(ContactsScreen(host) { _, num -> onNumber(num) }) },
     )
 }
 
@@ -463,8 +595,7 @@ class TextEntryScreen(host: MainActivity, private val prompt: String, private va
         '6' to "mno6", '7' to "pqrs7", '8' to "tuv8", '9' to "wxyz9", '0' to " 0",
     )
 
-    override val title get() = prompt
-    override val indicator get() = listOf("abc", "Abc", "ABC")[mode]
+    override val title get() = "$prompt  ${listOf("abc", "Abc", "ABC")[mode]}"
     override val leftSoft = "Send"
     override val rightSoft get() = if (buf.isEmpty()) "Back" else "Clear"
     override val centerSoft get() = "${160 - buf.length}"
@@ -487,16 +618,16 @@ class TextEntryScreen(host: MainActivity, private val prompt: String, private va
                 } else {
                     cycle = 0
                 }
-                val up = upper()
                 val c = chars[cycle]
-                buf.append(if (up) c.uppercaseChar() else c)
+                buf.append(if (upper()) c.uppercaseChar() else c)
                 lastKey = k
                 lastTime = now
             }
             k == Key.HASH -> { mode = (mode + 1) % 3; lastKey = null }
             k == Key.STAR -> { buf.append('*'); lastKey = null }
+            k == Key.RIGHT -> { buf.append(' '); lastKey = null }
             k == Key.SOFT_R && buf.isNotEmpty() -> { buf.deleteCharAt(buf.length - 1); lastKey = null }
-            k == Key.SOFT_L -> {
+            k == Key.SOFT_L || k == Key.OK -> {
                 if (buf.isEmpty()) return true
                 val s = buf.toString()
                 host.pop()
@@ -510,7 +641,8 @@ class TextEntryScreen(host: MainActivity, private val prompt: String, private va
     }
 
     override fun onLongKey(k: Key): Boolean {
-        val d = k.digit ?: return if (k == Key.SOFT_R) { buf.clear(); host.refresh(); true } else false
+        if (k == Key.SOFT_R) { buf.clear(); host.refresh(); return true }
+        val d = k.digit ?: return false
         if (!d.isDigit()) return false
         buf.append(d)
         lastKey = null
@@ -523,73 +655,55 @@ class TextEntryScreen(host: MainActivity, private val prompt: String, private va
 
 class ClockMenu(host: MainActivity) : ListScreen(host, "Clock") {
     override fun loadItems() = listOf(
-        Item("Alarm clock") { host.push(AlarmScreen(host)) },
-        Item("View alarms") { host.safeStart(Intent(AlarmClock.ACTION_SHOW_ALARMS)) },
-        Item("Countdown timer") { host.push(TimerScreen(host)) },
+        Item("Alarm clock", Icons.CLOCK) { host.push(TimeEntryScreen(host, alarm = true)) },
+        Item("View alarms", Icons.CLOCK) { host.safeStart(Intent(AlarmClock.ACTION_SHOW_ALARMS)) },
+        Item("Countdown timer", Icons.CLOCK) { host.push(TimeEntryScreen(host, alarm = false)) },
     )
 }
 
-class AlarmScreen(host: MainActivity) : Screen(host) {
+/** Digit entry for an alarm time (HH:MM) or a countdown length in minutes. */
+class TimeEntryScreen(host: MainActivity, private val alarm: Boolean) : Screen(host) {
     private val digits = StringBuilder()
-    override val title = "Alarm time:"
-    override val leftSoft = "OK"
+    override val title = if (alarm) "Alarm time" else "Minutes"
+    override val leftSoft = if (alarm) "OK" else "Start"
     override val rightSoft get() = if (digits.isEmpty()) "Back" else "Clear"
+    private val max = if (alarm) 4 else 3
 
     override fun render(): View = column(Gravity.CENTER).apply {
-        val s = digits.toString().padEnd(4, '_')
-        add(text("${s.substring(0, 2)}:${s.substring(2)}", 44f, Gravity.CENTER))
+        val shown = if (alarm) digits.toString().padEnd(4, '_').let { "${it.substring(0, 2)}:${it.substring(2)}" }
+        else if (digits.isEmpty()) "_" else digits.toString()
+        add(text(shown, 46f, Gravity.CENTER, bold = true))
     }
 
-    override fun onKey(k: Key): Boolean {
-        when {
-            k.digit?.isDigit() == true && digits.length < 4 -> digits.append(k.digit)
-            k == Key.SOFT_R && digits.isNotEmpty() -> digits.deleteCharAt(digits.length - 1)
-            k == Key.SOFT_L -> {
-                val h = digits.take(2).toString().toIntOrNull()
-                val m = digits.drop(2).toString().toIntOrNull()
-                if (digits.length != 4 || h == null || m == null || h > 23 || m > 59) { host.note("Invalid time"); return true }
-                val i = Intent(AlarmClock.ACTION_SET_ALARM)
-                    .putExtra(AlarmClock.EXTRA_HOUR, h)
-                    .putExtra(AlarmClock.EXTRA_MINUTES, m)
-                    .putExtra(AlarmClock.EXTRA_MESSAGE, "Nokia alarm")
-                    .putExtra(AlarmClock.EXTRA_SKIP_UI, true)
-                host.pop()
-                if (host.safeStart(i)) host.note("Alarm on\n%02d:%02d".format(h, m))
-                return true
-            }
-            k.digit != null -> return true
-            else -> return false
+    private fun confirm() {
+        if (alarm) {
+            val h = digits.take(2).toString().toIntOrNull()
+            val m = digits.drop(2).toString().toIntOrNull()
+            if (digits.length != 4 || h == null || m == null || h > 23 || m > 59) { host.note("Invalid time"); return }
+            val i = Intent(AlarmClock.ACTION_SET_ALARM)
+                .putExtra(AlarmClock.EXTRA_HOUR, h)
+                .putExtra(AlarmClock.EXTRA_MINUTES, m)
+                .putExtra(AlarmClock.EXTRA_MESSAGE, "Nokia alarm")
+                .putExtra(AlarmClock.EXTRA_SKIP_UI, true)
+            host.pop()
+            if (host.safeStart(i)) host.note("Alarm on\n%02d:%02d".format(h, m))
+        } else {
+            val m = digits.toString().toIntOrNull() ?: return
+            if (m == 0) return
+            val i = Intent(AlarmClock.ACTION_SET_TIMER)
+                .putExtra(AlarmClock.EXTRA_LENGTH, m * 60)
+                .putExtra(AlarmClock.EXTRA_MESSAGE, "Nokia timer")
+                .putExtra(AlarmClock.EXTRA_SKIP_UI, true)
+            host.pop()
+            if (host.safeStart(i)) host.note("Timer set\n$m min")
         }
-        host.refresh()
-        return true
-    }
-}
-
-class TimerScreen(host: MainActivity) : Screen(host) {
-    private val digits = StringBuilder()
-    override val title = "Minutes:"
-    override val leftSoft = "Start"
-    override val rightSoft get() = if (digits.isEmpty()) "Back" else "Clear"
-
-    override fun render(): View = column(Gravity.CENTER).apply {
-        add(text(if (digits.isEmpty()) "_" else digits.toString(), 44f, Gravity.CENTER))
     }
 
     override fun onKey(k: Key): Boolean {
         when {
-            k.digit?.isDigit() == true && digits.length < 3 -> digits.append(k.digit)
+            k.digit?.isDigit() == true -> if (digits.length < max) digits.append(k.digit)
             k == Key.SOFT_R && digits.isNotEmpty() -> digits.deleteCharAt(digits.length - 1)
-            k == Key.SOFT_L -> {
-                val m = digits.toString().toIntOrNull() ?: return true
-                if (m == 0) return true
-                val i = Intent(AlarmClock.ACTION_SET_TIMER)
-                    .putExtra(AlarmClock.EXTRA_LENGTH, m * 60)
-                    .putExtra(AlarmClock.EXTRA_MESSAGE, "Nokia timer")
-                    .putExtra(AlarmClock.EXTRA_SKIP_UI, true)
-                host.pop()
-                if (host.safeStart(i)) host.note("Timer set\n$m min")
-                return true
-            }
+            k == Key.SOFT_L || k == Key.OK -> { confirm(); return true }
             k.digit != null -> return true
             else -> return false
         }
@@ -600,19 +714,18 @@ class TimerScreen(host: MainActivity) : Screen(host) {
 
 // ------------------------------------------------------------------ apps
 
-class AppsScreen(host: MainActivity) : ListScreen(host, "Apps") {
-    override val emptyText = "No apps allowed.\nAdd them in\nSettings > Allowed apps"
-
-    override fun loadItems(): List<Item> {
+class AppsScreen(host: MainActivity) : GridScreen(host, "Apps") {
+    override fun loadCells(): List<Cell> {
         val pm = host.packageManager
-        return host.prefs.allowedApps.mapNotNull { pkg ->
+        val apps = host.prefs.allowedApps.mapNotNull { pkg ->
             try {
                 val label = pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString()
-                Item(label) { host.launchPackage(pkg) }
+                Cell(label, AppIcons.mask(host, pkg)) { host.launchPackage(pkg) }
             } catch (e: Exception) {
                 null
             }
         }.sortedBy { it.label.lowercase() }
+        return apps + Cell("More", Icons.APPS) { host.requirePin { host.push(AppPickerScreen(host)) } }
     }
 }
 
@@ -627,7 +740,7 @@ class AppPickerScreen(host: MainActivity) : ListScreen(host, "Allowed apps") {
             .distinctBy { it.first }
             .sortedBy { it.second.lowercase() }
             .map { (pkg, label) ->
-                Item("${if (pkg in allowed) "[x]" else "[ ]"} $label") {
+                Item("${if (pkg in allowed) "[x]" else "[ ]"} $label", AppIcons.mask(host, pkg)) {
                     val now = host.prefs.allowedApps
                     host.prefs.allowedApps = if (pkg in now) now - pkg else now + pkg
                     reload()
@@ -645,14 +758,15 @@ class PinScreen(host: MainActivity, private val prompt: String, private val onDo
     override val rightSoft get() = if (pin.isEmpty()) "Back" else "Clear"
 
     override fun render(): View = column(Gravity.CENTER).apply {
-        add(text(if (pin.isEmpty()) "_" else "*".repeat(pin.length), 36f, Gravity.CENTER))
+        add(icon(Icons.LOCK), height = host.dpi(40f))
+        add(text(if (pin.isEmpty()) "_" else "*".repeat(pin.length), 34f, Gravity.CENTER, bold = true))
     }
 
     override fun onKey(k: Key): Boolean {
         when {
-            k.digit?.isDigit() == true && pin.length < 8 -> pin.append(k.digit)
+            k.digit?.isDigit() == true -> if (pin.length < 8) pin.append(k.digit)
             k == Key.SOFT_R && pin.isNotEmpty() -> pin.deleteCharAt(pin.length - 1)
-            k == Key.SOFT_L || k == Key.CALL -> {
+            k == Key.SOFT_L || k == Key.CALL || k == Key.OK -> {
                 if (pin.length < 4) { host.note("Min. 4 digits"); return true }
                 val s = pin.toString()
                 host.pop()
@@ -668,18 +782,54 @@ class PinScreen(host: MainActivity, private val prompt: String, private val onDo
 }
 
 class SettingsScreen(host: MainActivity) : ListScreen(host, "Settings") {
+    /** Opens a quick panel where Android has one; full settings screens are PIN-locked as an escape hatch. */
+    private fun panelOrLocked(panel: String?, settings: String) {
+        if (panel != null && Build.VERSION.SDK_INT >= 29) host.safeStart(Intent(panel))
+        else host.requirePin { host.safeStart(Intent(settings)) }
+    }
+
     override fun loadItems(): List<Item> {
         val p = host.prefs
         return listOf(
-            Item("Allowed apps") { host.requirePin { host.push(AppPickerScreen(host)) } },
-            Item("Light: ${p.backlightSec}s") {
+            Item("Wi-Fi", Icons.WIFI, sub = true) {
+                panelOrLocked(if (Build.VERSION.SDK_INT >= 29) Settings.Panel.ACTION_INTERNET_CONNECTIVITY else null, Settings.ACTION_WIFI_SETTINGS)
+            },
+            Item("Bluetooth", Icons.BLUETOOTH, sub = true) { host.requirePin { host.safeStart(Intent(Settings.ACTION_BLUETOOTH_SETTINGS)) } },
+            Item("Sound", Icons.SOUND, sub = true) {
+                panelOrLocked(if (Build.VERSION.SDK_INT >= 29) Settings.Panel.ACTION_VOLUME else null, Settings.ACTION_SOUND_SETTINGS)
+            },
+            Item("Display", Icons.DISPLAY, sub = true) { host.push(DisplaySettings(host)) },
+            Item("Key tones: ${if (p.keySounds) "On" else "Off"}", Icons.SOUND) { p.keySounds = !p.keySounds; reload() },
+            Item("Allowed apps", Icons.APPS, sub = true) { host.requirePin { host.push(AppPickerScreen(host)) } },
+            Item("Change code", Icons.KEY) {
+                host.requirePin {
+                    host.push(PinScreen(host, "New code") { a ->
+                        host.push(PinScreen(host, "Verify code") { b ->
+                            if (a == b) { p.pin = a; host.note("Code changed") } else host.note("Codes do not match")
+                        })
+                    })
+                }
+            },
+            Item("Exit dumb mode", Icons.EXIT) { host.requirePin { host.exitDumbMode() } },
+            Item("About", Icons.ABOUT) { host.push(NoteScreen(host, "Nokia Mode 2.0\nDefault code 0000", 0)) },
+        )
+    }
+}
+
+class DisplaySettings(host: MainActivity) : ListScreen(host, "Display") {
+    override fun loadItems(): List<Item> {
+        val p = host.prefs
+        return listOf(
+            Item("Screen: ${host.palette.label}", Icons.DISPLAY) { host.setTheme(host.palette.next(), host.body); reload() },
+            Item("Phone: ${host.body.label}", Icons.PHONE) { host.setTheme(host.palette, host.body.next()); reload() },
+            Item("Home: ${if (p.bigClock) "Big clock" else "Wallpaper"}", Icons.GALLERY) { p.bigClock = !p.bigClock; reload() },
+            Item("Light: ${p.backlightSec}s", Icons.ABOUT) {
                 val opts = listOf(5, 10, 15, 30, 60)
                 p.backlightSec = opts[(opts.indexOf(p.backlightSec) + 1) % opts.size]
                 host.wake()
                 reload()
             },
-            Item("Key tones: ${if (p.keySounds) "On" else "Off"}") { p.keySounds = !p.keySounds; reload() },
-            Item("B&W phone: ${if (p.grayscale) "On" else "Off"}") {
+            Item("B&W phone: ${if (p.grayscale) "On" else "Off"}", Icons.DISPLAY) {
                 val want = !p.grayscale
                 if (Grayscale.set(host, want)) {
                     p.grayscale = want
@@ -688,17 +838,6 @@ class SettingsScreen(host: MainActivity) : ListScreen(host, "Settings") {
                     host.push(NoteScreen(host, "Needs PC setup:\nadb shell pm grant\n${host.packageName}\nandroid.permission.\nWRITE_SECURE_SETTINGS", 0))
                 }
             },
-            Item("Change code") {
-                host.requirePin {
-                    host.push(PinScreen(host, "New code:") { a ->
-                        host.push(PinScreen(host, "Verify code:") { b ->
-                            if (a == b) { p.pin = a; host.note("Code changed") } else host.note("Codes do not match")
-                        })
-                    })
-                }
-            },
-            Item("Exit dumb mode") { host.requirePin { host.exitDumbMode() } },
-            Item("About") { host.push(NoteScreen(host, "Nokia Mode 1.0\nDefault code 0000", 0)) },
         )
     }
 }

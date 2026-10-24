@@ -65,14 +65,13 @@ class SnakeGame(private val cols: Int = 20, private val rows: Int = 12) {
     }
 }
 
-class SnakeView(context: Context, private val game: SnakeGame) : View(context) {
-    private val paint = Paint().apply { color = Lcd.FG }
-    private val border = Paint().apply {
-        color = Lcd.FG
-        style = Paint.Style.STROKE
-    }
+class SnakeView(context: Context, private val game: SnakeGame, private val color: () -> Int) : View(context) {
+    private val paint = Paint()
+    private val border = Paint().apply { style = Paint.Style.STROKE }
 
     override fun onDraw(canvas: Canvas) {
+        paint.color = color()
+        border.color = color()
         val cell = minOf(width.toFloat() / game.width, height.toFloat() / game.height)
         val ox = (width - cell * game.width) / 2f
         val oy = (height - cell * game.height) / 2f
@@ -93,6 +92,7 @@ class SnakeScreen(host: MainActivity) : Screen(host) {
     private val game = SnakeGame()
     private var view: SnakeView? = null
     private var running = false
+    private var shownScore = 0
 
     private val loop = object : Runnable {
         override fun run() {
@@ -103,13 +103,18 @@ class SnakeScreen(host: MainActivity) : Screen(host) {
                 host.refresh()
                 return
             }
-            view?.invalidate()
+            if (game.score != shownScore) {
+                shownScore = game.score
+                host.refresh()
+            } else {
+                view?.invalidate()
+            }
             host.handler.postDelayed(this, game.delayMs)
         }
     }
 
-    override val title get() = if (game.over) "Game over!" else "Snake II"
-    override val indicator get() = "${game.score}"
+    override val title get() = if (game.over) "Game over! ${game.score}" else "Snake II  ${game.score}"
+    override val showTime = false
     override val leftSoft get() = when {
         game.over -> "Again"
         running -> "Pause"
@@ -119,7 +124,7 @@ class SnakeScreen(host: MainActivity) : Screen(host) {
 
     override fun render(): View {
         // The game view is kept so the loop can redraw it without rebuilding the LCD.
-        return (view ?: SnakeView(host, game).also { view = it }).also {
+        return (view ?: SnakeView(host, game) { host.fg }.also { view = it }).also {
             (it.parent as? android.view.ViewGroup)?.removeView(it)
             it.invalidate()
         }
@@ -145,9 +150,9 @@ class SnakeScreen(host: MainActivity) : Screen(host) {
         val d = when (k) {
             Key.D2, Key.UP -> SnakeGame.Dir.UP
             Key.D8, Key.DOWN -> SnakeGame.Dir.DOWN
-            Key.D4 -> SnakeGame.Dir.LEFT
-            Key.D6 -> SnakeGame.Dir.RIGHT
-            Key.SOFT_L, Key.D5 -> { if (running) pause() else start(); return true }
+            Key.D4, Key.LEFT -> SnakeGame.Dir.LEFT
+            Key.D6, Key.RIGHT -> SnakeGame.Dir.RIGHT
+            Key.SOFT_L, Key.D5, Key.OK -> { if (running) pause() else start(); return true }
             else -> return false
         }
         if (!running && !game.over) start()

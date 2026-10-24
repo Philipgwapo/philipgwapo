@@ -28,4 +28,20 @@ class Prefs(context: Context) {
     var snakeHigh: Int
         get() = sp.getInt("snake_high", 0)
         set(v) = sp.edit().putInt("snake_high", v).apply()
+
+    var palette: String
+        get() = sp.getString("palette", Palette.SAGE.name) ?: Palette.SAGE.name
+        set(v) = sp.edit().putString("palette", v).apply()
+
+    var body: String
+        get() = sp.getString("body", Body.BLACK.name) ?: Body.BLACK.name
+        set(v) = sp.edit().putString("body", v).apply()
+
+    var bigClock: Boolean
+        get() = sp.getBoolean("big_clock", false)
+        set(v) = sp.edit().putBoolean("big_clock", v).apply()
+
+    var backCamera: Boolean
+        get() = sp.getBoolean("back_camera", true)
+        set(v) = sp.edit().putBoolean("back_camera", v).apply()
 }
