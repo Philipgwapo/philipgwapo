@@ -11,15 +11,25 @@ android {
         applicationId = "com.philip.nokiamode"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "2.0"
+    }
+
+    // A fixed key committed with the project so every CI build can update the installed app.
+    // It only protects a personal sideloaded app; don't reuse it for anything published.
+    signingConfigs {
+        create("sideload") {
+            storeFile = file("nokia-mode.jks")
+            storePassword = "nokiamode"
+            keyAlias = "nokia"
+            keyPassword = "nokiamode"
+        }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
-            // Signed with the debug key so the release APK is installable straight from CI.
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName("sideload")
         }
     }
 
