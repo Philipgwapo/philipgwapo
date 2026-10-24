@@ -25,6 +25,9 @@ abstract class Screen(val host: MainActivity) {
     open val centerSoft: String = ""
     open val rightSoft: String = "Back"
 
+    /** Games set this so a held key auto-repeats instead of sending a long press. */
+    open val repeatKeys: Boolean = false
+
     /** Builds the LCD content. Called on every refresh, so keep state in fields. */
     abstract fun render(): View
 
@@ -79,8 +82,8 @@ class SplashScreen(host: MainActivity) : Screen(host) {
     private val done = Runnable { host.home() }
 
     override fun render(): View = column(Gravity.CENTER).apply {
-        add(text("NOKIA", 40f, Gravity.CENTER, bold = true))
-        add(text("CONNECTING PEOPLE", 13f, Gravity.CENTER))
+        add(icon(Wallpaper.logo(host)), 1f)
+        add(text("CONNECTING PEOPLE", 13f, Gravity.CENTER).apply { setPadding(0, host.dpi(6f), 0, 0) })
     }
 
     override fun onShow() { host.handler.postDelayed(done, 1800) }
@@ -109,27 +112,58 @@ class NoteScreen(host: MainActivity, private val msg: String, private val ms: Lo
 // ------------------------------------------------------------------ idle screen
 
 class HomeScreen(host: MainActivity) : Screen(host) {
-    override val leftSoft = "Menu"
-    override val rightSoft = "Apps"
-    override val showTime get() = !host.prefs.bigClock
+    private val p get() = host.prefs
+    private val inCall get() = CallManager.calls.isNotEmpty()
+
+    override val leftSoft get() = when {
+        inCall -> "Call"
+        p.newMessages > 0 -> "Read"
+        p.missedCalls > 0 -> "Show"
+        else -> "Menu"
+    }
+    override val rightSoft get() = Shortcuts.label(host, p.shortcut(Key.SOFT_R))
+    override val showTime get() = p.wallpaper != "clock"
     private var shownMinute = ""
 
     private fun now(pattern: String) = SimpleDateFormat(pattern, Locale.getDefault()).format(Date())
 
     override fun render(): View {
         shownMinute = now("HH:mm")
-        val wall = icon(Wallpaper.mask)
+        val date = now("EEE, MMM d").uppercase(Locale.getDefault())
         return column().apply {
-            if (host.prefs.bigClock) {
-                add(text(shownMinute, 46f, Gravity.CENTER, bold = true))
-                add(text(now("EEE, MMM d"), 16f, Gravity.CENTER))
-                add(wall, 1f)
-            } else {
-                add(wall, 1f)
-                add(text(now("EEE, MMM d").uppercase(Locale.getDefault()), 18f, Gravity.CENTER).apply {
-                    setPadding(0, host.dpi(6f), 0, host.dpi(2f))
-                })
+            when (p.wallpaper) {
+                "clock" -> {
+                    add(text(shownMinute, 46f, Gravity.CENTER, bold = true))
+                    add(text(date, 16f, Gravity.CENTER))
+                    add(icon(Wallpaper.logo(host)).apply { setPadding(0, host.dpi(6f), 0, 0) }, 1f)
+                }
+                "photo" -> {
+                    val v = PixelBitmapView(host)
+                    v.bitmap = Wallpaper.photoBitmap(host, host.fg, host.bg)
+                    if (v.bitmap == null) add(icon(Wallpaper.logo(host)), 1f) else add(v, 1f)
+                    add(text(date, 16f, Gravity.CENTER).apply { setPadding(0, host.dpi(4f), 0, 0) })
+                }
+                else -> {
+                    add(icon(if (p.wallpaper == "mountain") Wallpaper.mask else Wallpaper.logo(host)), 1f)
+                    add(text(date, 18f, Gravity.CENTER).apply { setPadding(0, host.dpi(6f), 0, host.dpi(2f)) })
+                }
             }
+            banner()?.let { add(it) }
+        }
+    }
+
+    /** "2 new messages" / "1 missed call" / "Call in progress" line under the date. */
+    private fun banner(): View? {
+        val (mask, msg) = when {
+            inCall -> Icons.PHONE to "Call in progress"
+            p.newMessages > 0 -> Icons.MESSAGES to "${p.newMessages} new message${if (p.newMessages > 1) "s" else ""}"
+            p.missedCalls > 0 -> Icons.PHONE to "${p.missedCalls} missed call${if (p.missedCalls > 1) "s" else ""}"
+            else -> return null
+        }
+        return row().apply {
+            gravity = Gravity.CENTER
+            addView(icon(mask), android.widget.LinearLayout.LayoutParams(host.dpi(18f), host.dpi(15f)).apply { marginEnd = host.dpi(6f) })
+            addView(text(msg, 15f, bold = true))
         }
     }
 
@@ -139,21 +173,96 @@ class HomeScreen(host: MainActivity) : Screen(host) {
 
     override fun onKey(k: Key): Boolean {
         when {
-            k == Key.SOFT_L -> host.push(MainMenu(host))
-            k == Key.SOFT_R -> host.push(AppsScreen(host))
-            k == Key.DOWN || k == Key.RIGHT -> host.push(ContactsScreen(host))
-            k == Key.UP -> host.push(MessagesScreen(host))
-            k == Key.LEFT -> host.push(CameraScreen(host))
-            k == Key.CALL -> host.push(CallLogScreen(host))
+            k == Key.SOFT_L -> when {
+                inCall -> host.push(CallScreen(host))
+                p.newMessages > 0 -> host.push(ConversationsScreen(host))
+                p.missedCalls > 0 -> { p.missedCalls = 0; host.push(CallLogScreen(host)) }
+                else -> host.push(MainMenu(host))
+            }
+            k == Key.OK -> host.push(MainMenu(host))
+            k in Shortcuts.keys -> Shortcuts.open(host, p.shortcut(k))
+            k == Key.CALL -> { p.missedCalls = 0; host.push(CallLogScreen(host)) }
             k.digit != null -> host.push(DialerScreen(host, k.digit.toString()))
             else -> return k == Key.END
         }
         return true
     }
+}
 
-    override fun onLongKey(k: Key): Boolean {
-        if (k == Key.D0) { host.push(DialerScreen(host, "+")); return true }
-        return false
+/** Configurable home-screen keys (Settings > Shortcuts). */
+object Shortcuts {
+    val keys = listOf(Key.UP, Key.DOWN, Key.LEFT, Key.RIGHT, Key.SOFT_R)
+
+    val actions = listOf(
+        "menu" to "Menu", "messages" to "Messages", "write" to "Write message", "contacts" to "Contacts",
+        "calls" to "Recent calls", "dialer" to "Dial number", "camera" to "Camera", "gallery" to "Gallery",
+        "clock" to "Clock", "alarm" to "Set alarm", "games" to "Games", "composer" to "Composer",
+        "apps" to "Apps", "settings" to "Settings",
+    )
+
+    fun keyName(k: Key) = when (k) {
+        Key.UP -> "Up"
+        Key.DOWN -> "Down"
+        Key.LEFT -> "Left"
+        Key.RIGHT -> "Right"
+        Key.SOFT_R -> "Right key"
+        else -> k.name
+    }
+
+    fun default(k: Key): String = when (k) {
+        Key.UP -> "messages"
+        Key.DOWN -> "contacts"
+        Key.LEFT -> "camera"
+        Key.RIGHT -> "calls"
+        else -> "apps"
+    }
+
+    fun label(host: MainActivity, id: String): String {
+        if (id.startsWith("app:")) {
+            val pkg = id.removePrefix("app:")
+            return try {
+                host.packageManager.getApplicationLabel(host.packageManager.getApplicationInfo(pkg, 0)).toString()
+            } catch (e: Exception) {
+                pkg
+            }
+        }
+        return actions.firstOrNull { it.first == id }?.second ?: id
+    }
+
+    fun open(host: MainActivity, id: String) {
+        when (id) {
+            "menu" -> host.push(MainMenu(host))
+            "messages" -> host.push(MessagesScreen(host))
+            "write" -> host.writeMessage()
+            "contacts" -> host.push(ContactsScreen(host))
+            "calls" -> host.push(CallLogScreen(host))
+            "dialer" -> host.push(DialerScreen(host, ""))
+            "camera" -> host.push(CameraScreen(host))
+            "gallery" -> host.push(GalleryScreen(host))
+            "clock" -> host.push(ClockMenu(host))
+            "alarm" -> host.push(TimeEntryScreen(host, alarm = true))
+            "games" -> host.push(GamesMenu(host))
+            "composer" -> host.push(ComposerMenu(host))
+            "apps" -> host.push(AppsScreen(host))
+            "settings" -> host.push(SettingsScreen(host))
+            else -> if (id.startsWith("app:")) host.launchPackage(id.removePrefix("app:"))
+        }
+    }
+}
+
+class ShortcutsScreen(host: MainActivity) : ListScreen(host, "Shortcuts") {
+    override fun loadItems() = Shortcuts.keys.map { k ->
+        Item("${Shortcuts.keyName(k)}: ${Shortcuts.label(host, host.prefs.shortcut(k))}", Icons.KEY, sub = true) {
+            host.push(SimpleList(host, Shortcuts.keyName(k)) {
+                val apps = host.prefs.allowedApps.map { "app:$it" to Shortcuts.label(host, "app:$it") }.sortedBy { it.second.lowercase() }
+                (Shortcuts.actions + apps).map { (id, label) ->
+                    Item(label, if (id.startsWith("app:")) AppIcons.mask(host, id.removePrefix("app:")) else null) {
+                        host.prefs.setShortcut(k, id)
+                        host.pop()
+                    }
+                }
+            })
+        }
     }
 }
 
@@ -318,7 +427,8 @@ class MainMenu(host: MainActivity) : GridScreen(host, "Menu") {
         Cell("Camera", Icons.CAMERA) { host.push(CameraScreen(host)) },
         Cell("Gallery", Icons.GALLERY) { host.push(GalleryScreen(host)) },
         Cell("Clock", Icons.CLOCK) { host.push(ClockMenu(host)) },
-        Cell("Games", Icons.GAMES) { host.push(SnakeScreen(host)) },
+        Cell("Games", Icons.GAMES) { host.push(GamesMenu(host)) },
+        Cell("Composer", Icons.NOTE) { host.push(ComposerMenu(host)) },
         Cell("Apps", Icons.APPS) { host.push(AppsScreen(host)) },
         Cell("Settings", Icons.SETTINGS) { host.push(SettingsScreen(host)) },
     )
@@ -370,7 +480,8 @@ class DialerScreen(
 
     override fun onLongKey(k: Key): Boolean {
         when (k) {
-            Key.D0 -> number.append('+')
+            // the short press already typed the 0
+            Key.D0 -> { if (number.endsWith('0')) number.setLength(number.length - 1); number.append('+') }
             Key.SOFT_R -> number.clear()
             else -> return false
         }
@@ -468,9 +579,7 @@ class ContactsScreen(
                     host.push(SimpleList(host, c.name) {
                         listOf(
                             Item("Call", Icons.PHONE) { host.call(c.number, c.name) },
-                            Item("Send message", Icons.MESSAGES) {
-                                host.push(TextEntryScreen(host, c.name) { body -> host.sms(c.number, body) })
-                            },
+                            Item("Send message", Icons.MESSAGES) { host.writeMessage(c.number) },
                             Item(c.number, null) {},
                         )
                     })
@@ -555,23 +664,15 @@ class MessagesScreen(host: MainActivity) : ListScreen(host, "Messages") {
     )
 
     override fun loadItems(): List<Item> {
-        val list = arrayListOf(Item("All Messages", Icons.MESSAGES, sub = true) { host.push(SmsMenu(host)) })
+        val list = arrayListOf(
+            Item("All Messages", Icons.MESSAGES, sub = true) { host.push(ConversationsScreen(host)) },
+            Item("Write message", Icons.SMS_NEW) { host.writeMessage() },
+        )
         messengers.filter { host.isInstalled(it.first) }.forEach { (pkg, label) ->
             list.add(Item(label, AppIcons.mask(host, pkg) ?: Icons.MESSAGES) { host.launchPackage(pkg) })
         }
         return list
     }
-}
-
-class SmsMenu(host: MainActivity) : ListScreen(host, "All Messages") {
-    override fun loadItems() = listOf(
-        Item("Inbox", Icons.MESSAGES) { host.openMessagesApp() },
-        Item("Write message", Icons.SMS_NEW) {
-            host.push(TextEntryScreen(host, "Message") { body ->
-                host.push(SendToScreen(host) { number -> host.sms(number, body) })
-            })
-        },
-    )
 }
 
 /** "Number or search" step after writing an SMS. */
@@ -583,8 +684,14 @@ class SendToScreen(host: MainActivity, private val onNumber: (String) -> Unit) :
 }
 
 /** Classic multi-tap text entry: press 2 twice for "b", # cycles case. */
-class TextEntryScreen(host: MainActivity, private val prompt: String, private val onDone: (String) -> Unit) : Screen(host) {
+class TextEntryScreen(
+    host: MainActivity,
+    private val prompt: String,
+    override val leftSoft: String = "Send",
+    private val onDone: (String) -> Unit,
+) : Screen(host) {
     private val buf = StringBuilder()
+    private var beforeKey = ""
     private var lastKey: Key? = null
     private var lastTime = 0L
     private var cycle = 0
@@ -596,7 +703,6 @@ class TextEntryScreen(host: MainActivity, private val prompt: String, private va
     )
 
     override val title get() = "$prompt  ${listOf("abc", "Abc", "ABC")[mode]}"
-    override val leftSoft = "Send"
     override val rightSoft get() = if (buf.isEmpty()) "Back" else "Clear"
     override val centerSoft get() = "${160 - buf.length}"
 
@@ -611,6 +717,7 @@ class TextEntryScreen(host: MainActivity, private val prompt: String, private va
         val d = k.digit
         when {
             d != null && d in letters -> {
+                beforeKey = buf.toString()
                 val chars = letters.getValue(d)
                 if (k == lastKey && now - lastTime < 1000 && buf.isNotEmpty()) {
                     cycle = (cycle + 1) % chars.length
@@ -625,7 +732,8 @@ class TextEntryScreen(host: MainActivity, private val prompt: String, private va
             }
             k == Key.HASH -> { mode = (mode + 1) % 3; lastKey = null }
             k == Key.STAR -> { buf.append('*'); lastKey = null }
-            k == Key.RIGHT -> { buf.append(' '); lastKey = null }
+            // Right only confirms the letter (so the same key can type the next one); 0 types a space.
+            k == Key.RIGHT -> lastKey = null
             k == Key.SOFT_R && buf.isNotEmpty() -> { buf.deleteCharAt(buf.length - 1); lastKey = null }
             k == Key.SOFT_L || k == Key.OK -> {
                 if (buf.isEmpty()) return true
@@ -644,6 +752,9 @@ class TextEntryScreen(host: MainActivity, private val prompt: String, private va
         if (k == Key.SOFT_R) { buf.clear(); host.refresh(); return true }
         val d = k.digit ?: return false
         if (!d.isDigit()) return false
+        // replace the letter the short press typed with the digit itself
+        buf.setLength(0)
+        buf.append(beforeKey)
         buf.append(d)
         lastKey = null
         host.refresh()
@@ -800,6 +911,21 @@ class SettingsScreen(host: MainActivity) : ListScreen(host, "Settings") {
             },
             Item("Display", Icons.DISPLAY, sub = true) { host.push(DisplaySettings(host)) },
             Item("Key tones: ${if (p.keySounds) "On" else "Off"}", Icons.SOUND) { p.keySounds = !p.keySounds; reload() },
+            Item("Ringtone: ${p.ringtone.ifEmpty { "Phone default" }}", Icons.NOTE, sub = true) {
+                host.push(SimpleList(host, "Ringtone") {
+                    (p.tunes.map { it.first } + "").map { n ->
+                        Item(n.ifEmpty { "Phone default" }, Icons.NOTE) {
+                            p.ringtone = n
+                            p.tunes.firstOrNull { it.first == n }?.let { Composer.play(Note.parseAll(it.second)) }
+                            host.pop()
+                        }
+                    }
+                })
+            },
+            Item("Shortcuts", Icons.KEY, sub = true) { host.push(ShortcutsScreen(host)) },
+            Item(if (PhoneRole.isDefault(host)) "Phone app: Kippoks" else "Phone app: Other", Icons.PHONE, sub = true) {
+                if (PhoneRole.isDefault(host)) host.requirePin { PhoneRole.openDefaultApps(host) } else PhoneRole.request(host)
+            },
             Item("Allowed apps", Icons.APPS, sub = true) { host.requirePin { host.push(AppPickerScreen(host)) } },
             Item("Change code", Icons.KEY) {
                 host.requirePin {
@@ -811,18 +937,31 @@ class SettingsScreen(host: MainActivity) : ListScreen(host, "Settings") {
                 }
             },
             Item("Exit dumb mode", Icons.EXIT) { host.requirePin { host.exitDumbMode() } },
-            Item("About", Icons.ABOUT) { host.push(NoteScreen(host, "Nokia Mode 2.0\nDefault code 0000", 0)) },
+            Item("About", Icons.ABOUT) { host.push(NoteScreen(host, "Kippoks 3.0\nDefault code 0000", 0)) },
         )
     }
 }
 
 class DisplaySettings(host: MainActivity) : ListScreen(host, "Display") {
+    private fun wallpaperName(w: String) = when (w) {
+        "mountain" -> "Mountains"
+        "clock" -> "Big clock"
+        "photo" -> "Photo"
+        else -> "Kippoks"
+    }
+
     override fun loadItems(): List<Item> {
         val p = host.prefs
         return listOf(
             Item("Screen: ${host.palette.label}", Icons.DISPLAY) { host.setTheme(host.palette.next(), host.body); reload() },
             Item("Phone: ${host.body.label}", Icons.PHONE) { host.setTheme(host.palette, host.body.next()); reload() },
-            Item("Home: ${if (p.bigClock) "Big clock" else "Wallpaper"}", Icons.GALLERY) { p.bigClock = !p.bigClock; reload() },
+            Item("Wallpaper: ${wallpaperName(p.wallpaper)}", Icons.GALLERY) {
+                val opts = listOf("logo", "mountain", "clock") + if (Wallpaper.hasPhoto(host)) listOf("photo") else emptyList()
+                p.wallpaper = opts[(opts.indexOf(p.wallpaper) + 1) % opts.size]
+                reload()
+            },
+            Item("Wallpaper from camera", Icons.CAMERA) { host.push(CameraScreen(host, forWallpaper = true)) },
+            Item("Wallpaper from gallery", Icons.GALLERY) { host.push(GalleryScreen(host, forWallpaper = true)) },
             Item("Light: ${p.backlightSec}s", Icons.ABOUT) {
                 val opts = listOf(5, 10, 15, 30, 60)
                 p.backlightSec = opts[(opts.indexOf(p.backlightSec) + 1) % opts.size]

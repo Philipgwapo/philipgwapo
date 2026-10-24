@@ -10,6 +10,7 @@ import android.graphics.drawable.AdaptiveIconDrawable
 import android.graphics.drawable.Drawable
 import android.os.Build
 import android.view.View
+import java.io.File
 import kotlin.random.Random
 
 /** A 1-bit image: the building block for every icon, the wallpaper and the camera viewfinder. */
@@ -207,9 +208,90 @@ object AppIcons {
     private fun lum(c: Int) = (Color.red(c) * 299 + Color.green(c) * 587 + Color.blue(c) * 114) / 1000
 }
 
-/** Procedural pixel-art mountain scene for the idle screen. */
+/** Idle-screen wallpapers: the Kippoks logo, a pixel mountain scene, or the user's own photo. */
 object Wallpaper {
     val mask: Mask by lazy { build() }
+
+    private var logoMask: Mask? = null
+    private const val PHOTO_FILE = "wallpaper.png"
+    private var photo: Bitmap? = null
+    private var photoLoaded = false
+    private var dithered: Bitmap? = null
+    private var ditherKey = 0L
+
+    /** The Kippoks mountain from the user's logo over solid pixel lettering (the outline font is unreadable at LCD size). */
+    fun logo(context: Context): Mask = logoMask ?: buildLogo(context).also { logoMask = it }
+
+    private fun buildLogo(context: Context): Mask {
+        val w = 96
+        val mountain = try {
+            context.assets.open("kippoks_mountain.png").use { android.graphics.BitmapFactory.decodeStream(it) }
+        } catch (e: Exception) {
+            null
+        }
+        val mw = 74
+        val mh = if (mountain == null) 0 else maxOf(1, mountain.height * mw / mountain.width)
+        val top = Mask(w, mh)
+        if (mountain != null) {
+            val small = Bitmap.createScaledBitmap(mountain, mw, mh, true)
+            val ox = (w - mw) / 2
+            for (y in 0 until mh) for (x in 0 until mw) {
+                val c = small.getPixel(x, y)
+                top[ox + x, y] = (Color.red(c) + Color.green(c) + Color.blue(c)) / 3 > 110
+            }
+        }
+        val th = 18
+        val text = Bitmap.createBitmap(w, th, Bitmap.Config.ARGB_8888)
+        val paint = Paint().apply {
+            typeface = Fonts.pixelBold
+            isAntiAlias = false
+            color = Color.BLACK
+            textSize = 16f
+            letterSpacing = 0.05f
+        }
+        while (paint.measureText("KIPPOKS") > w - 2 && paint.textSize > 8f) paint.textSize -= 0.5f
+        while (paint.measureText("KIPPOKS") < w - 10) paint.textSize += 0.5f
+        val tw = paint.measureText("KIPPOKS")
+        Canvas(text).drawText("KIPPOKS", (w - tw) / 2f, th - 3f, paint)
+        val gap = 3
+        val out = Mask(w, mh + gap + th)
+        for (y in 0 until mh) for (x in 0 until w) out[x, y] = top[x, y]
+        for (y in 0 until th) for (x in 0 until w) out[x, mh + gap + y] = Color.alpha(text.getPixel(x, y)) > 128
+        return out
+    }
+
+    fun hasPhoto(context: Context) = File(context.filesDir, PHOTO_FILE).exists()
+
+    /** Stores a small greyscale copy; it is dithered in the current screen colours when shown. */
+    fun setPhoto(context: Context, src: Bitmap): Boolean = try {
+        val w = 200
+        val small = Bitmap.createScaledBitmap(src, w, maxOf(1, src.height * w / src.width), true)
+        File(context.filesDir, PHOTO_FILE).outputStream().use { small.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        photo = small
+        photoLoaded = true
+        dithered = null
+        true
+    } catch (e: Exception) {
+        false
+    }
+
+    fun photoBitmap(context: Context, fg: Int, bg: Int): Bitmap? {
+        if (!photoLoaded) {
+            photoLoaded = true
+            photo = try {
+                android.graphics.BitmapFactory.decodeFile(File(context.filesDir, PHOTO_FILE).absolutePath)
+            } catch (e: Exception) {
+                null
+            }
+        }
+        val p = photo ?: return null
+        val key = (fg.toLong() shl 32) xor (bg.toLong() and 0xFFFFFFFFL)
+        if (dithered == null || key != ditherKey) {
+            dithered = Dither.photo(p, 120, fg, bg)
+            ditherKey = key
+        }
+        return dithered
+    }
 
     private fun build(): Mask {
         val w = 96
@@ -510,6 +592,72 @@ object Icons {
         "............#.#.",
         "............###.",
         "..............#.",
+    )
+    val NOTE = Mask.art(
+        ".......#########",
+        ".......#########",
+        ".......#.......#",
+        ".......#.......#",
+        ".......#.......#",
+        ".......#.......#",
+        ".......#.......#",
+        "...#####...#####",
+        "..######..######",
+        "..######..######",
+        "...####....####.",
+    )
+    val SPACE = Mask.art(
+        "##..............",
+        "####............",
+        ".######.........",
+        "..##########....",
+        "###############.",
+        "################",
+        "###############.",
+        "..##########....",
+        ".######.........",
+        "####............",
+        "##..............",
+    )
+    val BLOCKS = Mask.art(
+        "....####........",
+        "....####........",
+        "....########....",
+        "....########....",
+        "................",
+        "####....########",
+        "####....########",
+        "########....####",
+        "########....####",
+        "################",
+        "################",
+    )
+    val BRICKS = Mask.art(
+        "#####.#####.####",
+        "#####.#####.####",
+        "................",
+        "##.#####.#####.#",
+        "##.#####.#####.#",
+        "................",
+        "........##......",
+        "........##......",
+        "................",
+        "................",
+        ".....######.....",
+    )
+    val PAIRS = Mask.art(
+        "######..######..",
+        "#....#..#....#..",
+        "#.##.#..#.##.#..",
+        "#.##.#..#.##.#..",
+        "#....#..#....#..",
+        "######..######..",
+        "................",
+        "######..######..",
+        "######..######..",
+        "######..######..",
+        "######..######..",
+        "######..######..",
     )
     val SMS_NEW = Mask.art(
         "##########..##..",

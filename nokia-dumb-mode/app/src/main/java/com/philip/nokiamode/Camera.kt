@@ -231,6 +231,23 @@ object Photos {
         null
     }
 
+    /** Decodes a just-taken JPEG small and upright (the legacy camera only tags rotation in EXIF). */
+    fun decodeJpeg(jpeg: ByteArray, maxDim: Int = 400): Bitmap? = try {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, bounds)
+        val opts = BitmapFactory.Options().apply { inSampleSize = maxOf(1, maxOf(bounds.outWidth, bounds.outHeight) / maxDim) }
+        val bmp = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, opts)
+        val deg = when (ExifInterface(jpeg.inputStream()).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)) {
+            ExifInterface.ORIENTATION_ROTATE_90 -> 90f
+            ExifInterface.ORIENTATION_ROTATE_180 -> 180f
+            ExifInterface.ORIENTATION_ROTATE_270 -> 270f
+            else -> 0f
+        }
+        if (bmp != null && deg != 0f) Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, Matrix().apply { postRotate(deg) }, true) else bmp
+    } catch (e: Exception) {
+        null
+    }
+
     fun delete(context: Context, uri: Uri): Boolean = try {
         context.contentResolver.delete(uri, null, null) > 0
     } catch (e: Exception) {
@@ -242,8 +259,8 @@ private fun storagePermissions(): Array<String> =
     if (Build.VERSION.SDK_INT < 29) arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE, Manifest.permission.READ_EXTERNAL_STORAGE)
     else emptyArray()
 
-class CameraScreen(host: MainActivity) : Screen(host) {
-    override val title = "Camera"
+class CameraScreen(host: MainActivity, private val forWallpaper: Boolean = false) : Screen(host) {
+    override val title = if (forWallpaper) "Wallpaper" else "Camera"
     override val leftSoft = "Options"
     private val viewfinder = PixelBitmapView(host)
     private var frame: Bitmap? = null
@@ -313,9 +330,20 @@ class CameraScreen(host: MainActivity) : Screen(host) {
             }
             Thread {
                 val ok = Photos.save(host, data)
+                val wall = if (forWallpaper) Photos.decodeJpeg(data)?.let { Wallpaper.setPhoto(host, it) } == true else false
                 host.runOnUiThread {
                     busy = false
-                    if (host.current === this) host.note(if (ok) "Photo saved" else "Save failed", 900)
+                    if (forWallpaper) {
+                        if (wall) {
+                            host.prefs.wallpaper = "photo"
+                            host.close(this)
+                            host.note("Wallpaper set")
+                        } else {
+                            host.note("Failed")
+                        }
+                    } else if (host.current === this) {
+                        host.note(if (ok) "Photo saved" else "Save failed", 900)
+                    }
                 }
             }.start()
         }
@@ -340,9 +368,9 @@ class CameraScreen(host: MainActivity) : Screen(host) {
     }
 }
 
-class GalleryScreen(host: MainActivity) : Screen(host) {
-    override val title = "Gallery"
-    override val leftSoft get() = if (uris.isEmpty()) "" else "Options"
+class GalleryScreen(host: MainActivity, private val forWallpaper: Boolean = false) : Screen(host) {
+    override val title = if (forWallpaper) "Pick wallpaper" else "Gallery"
+    override val leftSoft get() = if (uris.isEmpty()) "" else if (forWallpaper) "Use" else "Options"
     override val centerSoft get() = if (uris.isEmpty()) "" else "${idx + 1}/${uris.size}"
 
     private var uris: List<Uri> = emptyList()
@@ -390,6 +418,17 @@ class GalleryScreen(host: MainActivity) : Screen(host) {
         add(v, 1f)
     }
 
+    private fun setWallpaper(uri: Uri) {
+        val bmp = Photos.load(host, uri)
+        if (bmp != null && Wallpaper.setPhoto(host, bmp)) {
+            host.prefs.wallpaper = "photo"
+            if (forWallpaper) host.close(this)
+            host.note("Wallpaper set")
+        } else {
+            host.note("Failed")
+        }
+    }
+
     override fun onKey(k: Key): Boolean {
         val n = uris.size
         if (n == 0) return false
@@ -398,8 +437,13 @@ class GalleryScreen(host: MainActivity) : Screen(host) {
             Key.RIGHT, Key.DOWN -> { idx = (idx + 1) % n; load() }
             Key.SOFT_L -> {
                 val uri = uris[idx]
+                if (forWallpaper) {
+                    setWallpaper(uri)
+                    return true
+                }
                 host.push(SimpleList(host, "Options") {
                     listOf(
+                        ListScreen.Item("Set as wallpaper", Icons.GALLERY) { host.pop(); setWallpaper(uri) },
                         ListScreen.Item("Delete photo", Icons.EXIT) {
                             host.pop()
                             host.note(if (Photos.delete(host, uri)) "Deleted" else "Can't delete")

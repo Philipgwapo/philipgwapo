@@ -15,8 +15,10 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.provider.ContactsContract
 import android.provider.Settings
+import android.telecom.TelecomManager
 import android.telephony.TelephonyManager
 import android.view.Gravity
 import android.view.HapticFeedbackConstants
@@ -26,6 +28,7 @@ import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.WindowManager
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import java.text.SimpleDateFormat
@@ -33,6 +36,11 @@ import java.util.Date
 import java.util.Locale
 
 class MainActivity : Activity() {
+    companion object {
+        const val EXTRA_SHOW_CALL = "show_call"
+        const val EXTRA_CALL_ACTION = "call_action"
+    }
+
     lateinit var prefs: Prefs
         private set
     val handler = Handler(Looper.getMainLooper())
@@ -60,6 +68,7 @@ class MainActivity : Activity() {
     private val dimRunnable = Runnable { setLit(false) }
     private var tone: ToneGenerator? = null
     private var paused = false
+    private var proximity: PowerManager.WakeLock? = null
 
     private val tick = object : Runnable {
         override fun run() {
@@ -80,7 +89,11 @@ class MainActivity : Activity() {
         body = Body.of(prefs.body)
         setContentView(buildLayout())
         tone = try { ToneGenerator(AudioManager.STREAM_DTMF, 60) } catch (e: RuntimeException) { null }
-        push(SplashScreen(this))
+        CallManager.listener = { onCallsChanged() }
+        AppEvents.listener = { onAppEvent(it) }
+        if (CallManager.calls.isEmpty() && !isDialIntent(intent)) push(SplashScreen(this)) else home()
+        handleIntent(intent)
+        onCallsChanged()
         requestMissingPermissions()
     }
 
@@ -108,13 +121,104 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         tone?.release()
+        releaseProximity()
+        if (CallManager.listener != null) CallManager.listener = null
+        AppEvents.listener = null
         super.onDestroy()
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         // Pressing the system Home button while we're already the launcher returns to the idle screen.
-        if (intent.hasCategory(Intent.CATEGORY_HOME)) home()
+        if (intent.hasCategory(Intent.CATEGORY_HOME) && intent.action == Intent.ACTION_MAIN) {
+            home()
+            if (CallManager.calls.isNotEmpty()) refresh()
+        }
+        handleIntent(intent)
+    }
+
+    private fun isDialIntent(i: Intent?) = i?.action == Intent.ACTION_DIAL || (i?.action == Intent.ACTION_VIEW && i.data?.scheme == "tel")
+
+    private fun handleIntent(i: Intent?) {
+        if (i == null) return
+        if (isDialIntent(i)) {
+            home()
+            push(DialerScreen(this, i.data?.schemeSpecificPart ?: ""))
+            return
+        }
+        if (i.getBooleanExtra(EXTRA_SHOW_CALL, false) && CallManager.calls.isNotEmpty()) {
+            if (current !is CallScreen) push(CallScreen(this))
+            when (i.getStringExtra(EXTRA_CALL_ACTION)) {
+                "answer" -> (current as? CallScreen)?.answer()
+                "reject" -> (current as? CallScreen)?.hangUp()
+            }
+            i.removeExtra(EXTRA_CALL_ACTION)
+        }
+    }
+
+    // ---------------------------------------------------------------- calls & events
+
+    private fun onCallsChanged() {
+        val active = CallManager.calls.isNotEmpty()
+        setLockScreenVisible(active)
+        if (active) {
+            wake()
+            val ringing = CallManager.calls.any { CallManager.state(it) == android.telecom.Call.STATE_RINGING }
+            if (current !is CallScreen && (ringing || stack.none { it is CallScreen })) push(CallScreen(this)) else refresh()
+        } else if (stack.any { it is CallScreen }) {
+            stack.removeAll { it is CallScreen }
+            if (stack.isEmpty()) stack.add(HomeScreen(this))
+            show()
+            note("Call ended", 1200)
+        } else {
+            refresh()
+        }
+        updateProximity()
+    }
+
+    private fun onAppEvent(e: String) {
+        when (e) {
+            "sms_sent" -> note("Message sent", 1000)
+            "sms_failed" -> note("Message failed")
+            else -> {
+                val s = current
+                if (s is ListScreen) s.reload() else if (s is ThreadScreen) { s.onShow(); refresh() } else refresh()
+            }
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun setLockScreenVisible(on: Boolean) {
+        if (Build.VERSION.SDK_INT >= 27) {
+            setShowWhenLocked(on)
+            setTurnScreenOn(on)
+        } else {
+            val f = WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
+            if (on) window.addFlags(f) else window.clearFlags(f)
+        }
+    }
+
+    /** Screen off against the ear during a live call (kept across onPause, which the screen-off itself triggers). */
+    private fun updateProximity() {
+        val live = CallManager.calls.any {
+            CallManager.state(it) in listOf(android.telecom.Call.STATE_ACTIVE, android.telecom.Call.STATE_DIALING, android.telecom.Call.STATE_CONNECTING)
+        }
+        val speaker = CallManager.audio?.route == android.telecom.CallAudioState.ROUTE_SPEAKER
+        if (live && !speaker) {
+            if (proximity == null) {
+                val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+                if (pm.isWakeLockLevelSupported(PowerManager.PROXIMITY_SCREEN_OFF_WAKE_LOCK)) {
+                    proximity = pm.newWakeLock(PowerManager.PROXIMITY_SCREEN_OFF_WAKE_LOCK, "kippoks:call").apply { acquire(4 * 60 * 60 * 1000L) }
+                }
+            }
+        } else {
+            releaseProximity()
+        }
+    }
+
+    private fun releaseProximity() {
+        proximity?.let { if (it.isHeld) it.release() }
+        proximity = null
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -165,16 +269,15 @@ class MainActivity : Activity() {
             }
             setPadding(dpi(14f), dpi(6f), dpi(14f), dpi(16f))
         }
-        val logo = TextView(this).apply {
-            text = "NOKIA"
-            textSize = 19f
-            letterSpacing = 0.08f
-            typeface = Fonts.logo
-            setTextColor(body.logo)
-            gravity = Gravity.CENTER
+        val logoRes = resources.getIdentifier("kippoks_logo", "drawable", packageName)
+        val logo = ImageView(this).apply {
+            if (logoRes != 0) setImageResource(logoRes)
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            adjustViewBounds = true
         }
-        bezel.addView(logo, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-            bottomMargin = dpi(4f)
+        bezel.addView(logo, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dpi(34f)).apply {
+            bottomMargin = dpi(5f)
+            topMargin = dpi(2f)
         })
 
         lcd = LinearLayout(this).apply {
@@ -216,7 +319,7 @@ class MainActivity : Activity() {
         bezel.addView(lcd, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
         root.addView(bezel, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 50f))
 
-        keypad = Keypad(this, body) { k, long -> press(k, long) }
+        keypad = Keypad(this, body, { current?.repeatKeys == true }) { k, long -> press(k, long) }
         root.addView(keypad.view, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 50f).apply {
             topMargin = dpi(10f)
         })
@@ -330,7 +433,7 @@ class MainActivity : Activity() {
         show()
     }
 
-    private fun show() {
+    fun show() {
         current?.onShow()
         refresh()
     }
@@ -365,9 +468,14 @@ class MainActivity : Activity() {
 
     fun press(k: Key, long: Boolean = false) {
         wake()
-        feedback(k)
         val s = current ?: return
-        var handled = (long && s.onLongKey(k)) || s.onKey(k)
+        // Keys fire on touch, so a long press is an extra event on top of the short one already sent.
+        if (long) {
+            s.onLongKey(k)
+            return
+        }
+        feedback(k)
+        var handled = s.onKey(k)
         // The centre key acts as "Select" unless the screen gives it its own meaning.
         if (!handled && k == Key.OK) handled = s.onKey(Key.SOFT_L)
         if (!handled) {
@@ -428,7 +536,9 @@ class MainActivity : Activity() {
     // ---------------------------------------------------------------- permissions
 
     private fun requestMissingPermissions() {
-        val wanted = arrayOf(Manifest.permission.CALL_PHONE, Manifest.permission.READ_CONTACTS, Manifest.permission.READ_CALL_LOG)
+        val wanted = arrayOf(Manifest.permission.CALL_PHONE, Manifest.permission.READ_CONTACTS, Manifest.permission.READ_CALL_LOG) +
+            SmsRepo.permissions +
+            if (Build.VERSION.SDK_INT >= 33) arrayOf(Manifest.permission.POST_NOTIFICATIONS) else emptyArray()
         val missing = wanted.filter { !hasPermission(it) }
         if (missing.isNotEmpty()) requestPermissions(missing.toTypedArray(), 1)
     }
@@ -447,6 +557,17 @@ class MainActivity : Activity() {
 
     fun hasPermission(p: String) = checkSelfPermission(p) == PackageManager.PERMISSION_GRANTED
 
+    @Deprecated("Deprecated in Java")
+    @Suppress("DEPRECATION")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == 7) {
+            if (PhoneRole.isDefault(this)) note("Kippoks is now\nyour Phone app")
+            current?.onShow()
+            refresh()
+        }
+    }
+
     // ---------------------------------------------------------------- actions
 
     fun safeStart(i: Intent): Boolean = try {
@@ -460,9 +581,19 @@ class MainActivity : Activity() {
         false
     }
 
-    /** Shows the Nokia "Calling..." screen, then hands the call to the system phone app. */
+    /**
+     * As the default Phone app the call goes straight to Telecom and comes back to [CallScreen];
+     * otherwise show the "Calling..." splash and hand over to the system phone app.
+     */
     fun call(number: String, name: String? = null) {
         if (number.isBlank()) return
+        if (PhoneRole.isDefault(this) && hasPermission(Manifest.permission.CALL_PHONE)) {
+            try {
+                (getSystemService(Context.TELECOM_SERVICE) as TelecomManager).placeCall(Uri.fromParts("tel", number, null), Bundle())
+                return
+            } catch (e: SecurityException) {
+            }
+        }
         push(CallingScreen(this, number, name ?: lookupName(number) ?: number))
     }
 
@@ -471,7 +602,7 @@ class MainActivity : Activity() {
         safeStart(Intent(action, Uri.parse("tel:" + Uri.encode(number))))
     }
 
-    private fun lookupName(number: String): String? {
+    fun lookupName(number: String): String? {
         if (!hasPermission(Manifest.permission.READ_CONTACTS)) return null
         return try {
             val uri = Uri.withAppendedPath(ContactsContract.PhoneLookup.CONTENT_FILTER_URI, Uri.encode(number))

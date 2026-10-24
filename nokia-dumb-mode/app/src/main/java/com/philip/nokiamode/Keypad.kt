@@ -24,13 +24,20 @@ enum class Key(val digit: Char?, val letters: String = "") {
     }
 }
 
-/** Base for keys: press highlight, long-press detection, and the body colour scheme. */
+/**
+ * Base for keys. A key fires the moment it's touched (no waiting for the finger to lift). Holding it
+ * either auto-repeats (games) or sends one long press (e.g. 0 for "+").
+ */
 @SuppressLint("ViewConstructor")
 abstract class PressView(context: Context, protected val keypad: Keypad) : View(context) {
-    private var longFired = false
     private var downKey: Key? = null
-    private val longPress = Runnable {
-        downKey?.let { longFired = true; keypad.onKey(it, true) }
+    private val longPress = Runnable { downKey?.let { keypad.onKey(it, true) } }
+    private val repeat = object : Runnable {
+        override fun run() {
+            val k = downKey ?: return
+            keypad.onKey(k, false)
+            postDelayed(this, 70)
+        }
     }
 
     abstract fun keyAt(x: Float, y: Float): Key?
@@ -39,25 +46,21 @@ abstract class PressView(context: Context, protected val keypad: Keypad) : View(
     override fun onTouchEvent(e: MotionEvent): Boolean {
         when (e.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
-                downKey = keyAt(e.x, e.y) ?: return false
-                longFired = false
+                val k = keyAt(e.x, e.y) ?: return false
+                downKey = k
                 isPressed = true
-                postDelayed(longPress, 550)
+                invalidate()
+                keypad.onKey(k, false)
+                if (keypad.repeating()) postDelayed(repeat, 220) else postDelayed(longPress, 550)
             }
-            MotionEvent.ACTION_UP -> {
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                 removeCallbacks(longPress)
-                isPressed = false
-                val k = downKey
-                if (k != null && !longFired) keypad.onKey(k, false)
-                downKey = null
-            }
-            MotionEvent.ACTION_CANCEL -> {
-                removeCallbacks(longPress)
+                removeCallbacks(repeat)
                 isPressed = false
                 downKey = null
+                invalidate()
             }
         }
-        invalidate()
         return true
     }
 
@@ -180,7 +183,12 @@ class NavPadView(context: Context, keypad: Keypad) : PressView(context, keypad) 
 }
 
 /** On-screen keypad laid out like the reference handset. */
-class Keypad(private val context: Context, var body: Body, private val handler: (Key, Boolean) -> Unit) {
+class Keypad(
+    private val context: Context,
+    var body: Body,
+    val repeating: () -> Boolean,
+    private val handler: (Key, Boolean) -> Unit,
+) {
     var lit = true
         private set
     private val views = ArrayList<View>()

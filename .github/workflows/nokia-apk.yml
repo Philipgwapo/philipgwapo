@@ -1,4 +1,4 @@
-name: Build Nokia Mode APK
+name: Build Kippoks APK
 
 on:
   push:
@@ -26,5 +26,5 @@ jobs:
           ./gradlew --no-daemon assembleRelease
       - uses: actions/upload-artifact@v4
         with:
-          name: nokia-mode-apk
+          name: kippoks-apk
           path: nokia-dumb-mode/app/build/outputs/apk/release/*.apk
